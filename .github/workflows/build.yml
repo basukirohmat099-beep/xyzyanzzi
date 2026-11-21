@@ -1,0 +1,132 @@
+name: Flutter Build
+
+on:
+  workflow_dispatch:
+    inputs:
+      zip_url:
+        description: "URL ZIP project Flutter"
+        required: true
+      tag:
+        description: "Tag build"
+        required: true
+      build_type:
+        description: "release | debug | analyze"
+        required: false
+        default: "release"
+        type: choice
+        options:
+          - release
+          - debug
+          - analyze
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  build:
+    name: Build ${{ inputs.tag }} (${{ inputs.build_type }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Setup Flutter 3.24.0
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: "3.24.0"
+          channel: stable
+          cache: true
+
+      - name: Info versi
+        run: |
+          flutter --version
+          java -version
+          node -v || true
+
+      - name: Download & extract ZIP
+        run: |
+          set -e
+          echo "📥 Download: ${{ inputs.zip_url }}"
+          curl -L --fail --retry 3 -o project.zip "${{ inputs.zip_url }}"
+          ls -lh project.zip
+          mkdir -p project
+          unzip -q project.zip -d project
+          ls -la project
+
+      - name: Deteksi root project
+        id: root
+        run: |
+          set -e
+          ROOT=$(find project -name pubspec.yaml -not -path "*/build/*" -not -path "*/.dart_tool/*" | head -1 | xargs -r dirname)
+          if [ -z "$ROOT" ]; then
+            echo "❌ pubspec.yaml tidak ditemukan di dalam ZIP."
+            exit 1
+          fi
+          echo "✅ Root project: $ROOT"
+          echo "dir=$ROOT" >> "$GITHUB_OUTPUT"
+
+      - name: Flutter pub get
+        working-directory: ${{ steps.root.outputs.dir }}
+        run: |
+          flutter pub get 2>&1 | tee pub_get.log || true
+
+      - name: Flutter analyze
+        if: inputs.build_type == 'analyze'
+        working-directory: ${{ steps.root.outputs.dir }}
+        timeout-minutes: 15
+        run: |
+          set +e
+          echo "[RESULT_ANALYZE]"
+          flutter analyze --no-pub 2>&1 | tee analyze.log
+          echo "[END_RESULT_ANALYZE]"
+          exit 0
+
+      - name: Flutter build APK (release)
+        if: inputs.build_type == 'release'
+        working-directory: ${{ steps.root.outputs.dir }}
+        timeout-minutes: 45
+        run: flutter build apk --release --no-pub
+
+      - name: Flutter build APK (debug)
+        if: inputs.build_type == 'debug'
+        working-directory: ${{ steps.root.outputs.dir }}
+        timeout-minutes: 45
+        run: flutter build apk --debug --no-pub
+
+      - name: Upload APK artifact
+        if: inputs.build_type != 'analyze'
+        uses: actions/upload-artifact@v4
+        with:
+          name: apk-${{ inputs.tag }}-${{ inputs.build_type }}
+          path: |
+            ${{ steps.root.outputs.dir }}/build/app/outputs/flutter-apk/*.apk
+            ${{ steps.root.outputs.dir }}/build/app/outputs/apk/**/*.apk
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Upload analyze log
+        if: always() && inputs.build_type == 'analyze'
+        uses: actions/upload-artifact@v4
+        with:
+          name: analyze-${{ inputs.tag }}
+          path: |
+            ${{ steps.root.outputs.dir }}/analyze.log
+            ${{ steps.root.outputs.dir }}/pub_get.log
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Ringkasan akhir
+        if: always()
+        run: |
+          echo "🎯 Build type : ${{ inputs.build_type }}"
+          echo "🏷️ Tag        : ${{ inputs.tag }}"
+          echo "✅ Status     : ${{ job.status }}"
