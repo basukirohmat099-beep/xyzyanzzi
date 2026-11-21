@@ -1,14 +1,22 @@
+# =============================================================================
+#  BUILD.YML — Flutter APK Builder (FIXED)
+#  Dipicu oleh bot lewat: github.js → triggerWorkflow()
+#  Input: zip_url, tag, build_type
+# =============================================================================
+
 name: Flutter Build
 
 on:
   workflow_dispatch:
     inputs:
       zip_url:
-        description: "URL ZIP project Flutter"
+        description: "URL ZIP project Flutter (dari release asset)"
         required: true
+        type: string
       tag:
-        description: "Tag build"
+        description: "Tag / nama build"
         required: true
+        type: string
       build_type:
         description: "release | debug | analyze"
         required: false
@@ -22,6 +30,10 @@ on:
 permissions:
   contents: read
   actions: read
+
+concurrency:
+  group: build-${{ inputs.tag }}
+  cancel-in-progress: false
 
 jobs:
   build:
@@ -52,16 +64,29 @@ jobs:
           java -version
           node -v || true
 
+      # ─── DOWNLOAD ZIP (FIXED: fallback auth untuk private repo) ───────────
       - name: Download & extract ZIP
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -e
           echo "📥 Download: ${{ inputs.zip_url }}"
-          curl -L --fail --retry 3 -o project.zip "${{ inputs.zip_url }}"
+
+          # Coba download publik dulu
+          if ! curl -L --fail --retry 2 -o project.zip "${{ inputs.zip_url }}"; then
+            echo "⚠️ Download publik gagal, coba pakai GITHUB_TOKEN..."
+            curl -L --fail --retry 3 \
+              -H "Authorization: Bearer $GH_TOKEN" \
+              -H "Accept: application/vnd.github+json" \
+              -o project.zip "${{ inputs.zip_url }}"
+          fi
+
           ls -lh project.zip
           mkdir -p project
           unzip -q project.zip -d project
           ls -la project
 
+      # ─── DETEKSI ROOT PROJECT ─────────────────────────────────────────────
       - name: Deteksi root project
         id: root
         run: |
@@ -74,11 +99,13 @@ jobs:
           echo "✅ Root project: $ROOT"
           echo "dir=$ROOT" >> "$GITHUB_OUTPUT"
 
+      # ─── PUB GET ──────────────────────────────────────────────────────────
       - name: Flutter pub get
         working-directory: ${{ steps.root.outputs.dir }}
         run: |
           flutter pub get 2>&1 | tee pub_get.log || true
 
+      # ─── ANALYZE (mode analyze) ───────────────────────────────────────────
       - name: Flutter analyze
         if: inputs.build_type == 'analyze'
         working-directory: ${{ steps.root.outputs.dir }}
@@ -90,6 +117,7 @@ jobs:
           echo "[END_RESULT_ANALYZE]"
           exit 0
 
+      # ─── BUILD APK ────────────────────────────────────────────────────────
       - name: Flutter build APK (release)
         if: inputs.build_type == 'release'
         working-directory: ${{ steps.root.outputs.dir }}
@@ -102,6 +130,7 @@ jobs:
         timeout-minutes: 45
         run: flutter build apk --debug --no-pub
 
+      # ─── UPLOAD ARTIFACT ──────────────────────────────────────────────────
       - name: Upload APK artifact
         if: inputs.build_type != 'analyze'
         uses: actions/upload-artifact@v4
